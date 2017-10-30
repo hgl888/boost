@@ -1,16 +1,50 @@
-# Boost regression-testing Jamfile
-#  (C) Copyright David Abrahams 2002. Permission to copy, use, modify, sell and
-#  distribute this software is granted provided this copyright notice appears in
-#  all copies. This software is provided "as is" without express or implied
-#  warranty, and with no claim as to its suitability for any purpose.
+# Copyright 2002. Dave Abrahams
+# Copyright 2016. Rene Rivera
+# Distributed under the Boost Software License, Version 1.0.
+# (See accompanying file LICENSE_1_0.txt or copy at
+# http://www.boost.org/LICENSE_1_0.txt)
 
-#  Status:
-#  - std::locale-support usage is commented out.
-#  Two test suite have different names.
-#  <no-warn> in config test is commented out.
-#  One of the smart_ptr test is run only from invocation dir in V1, and not
-#  run in V2 at all.
-
+# This build project manages running the tests for all of Boost.
+# The tests to run are discovered from the structure of the libs tree.
+#
+# Usage:
+#
+# > cd boost-root/status
+# > b2 [--check-libs-only] [--limit-tests=/lib-name-regex../]* [--exclude-tests=/lib-name-regex../]*
+#
+# --check-libs-only
+#   Only runs the library conformance tests.
+#
+# --no-check-libs
+#   Do not run the library conformance tests.
+#
+# --limit-tests, or --include-tests
+#   Only runs the tests for whom the name matches the regex.
+#   The value for the argument is a comma separated list of simple
+#   regular expressions to check against the names of all the libraries.
+#   If any one regex matches the matching library is tested.
+#
+# --exclude-tests
+#   Only runs the tests for whom the names does not match the regex.
+#   The argument is the same as for the limit-tests option except
+#   that the result is that libraries for whom the name matches
+#   are not tested.
+#
+# The test filters are evaluated in the order given in the command
+# and can be used to selectively narrow or widen the set of libraries
+# tested.
+#
+# Examples:
+#
+# > b2 --check-libs-only --include-tests=predef,config
+# 
+# Runs the library conformance tests for the predef and config
+# libraries only.
+#
+# > b2 --include-tests=[n-t] --exclude-tests=rat --limit-tests=[v-w]
+#
+# Runs all the tests for library names that begin with "n" through "t",
+# or "v" through "w", but not libraries that start with "rat".
 
 project status
     : source-location $(BOOST_ROOT)
@@ -23,35 +57,72 @@ import project ;
 import regex ;
 import modules ;
 import path ;
+import feature ;
+import numbers ;
 
 local check-libs-only = [ MATCH "^--(check-libs-only)" : [ modules.peek : ARGV ] ] ;
+local no-check-libs = [ MATCH "^--(no-check-libs)$" : [ modules.peek : ARGV ] ] ;
 local check-libs-only-targets = ;
 local libraries = ;
 
 local rule run-tests ( root : tests * )
 {
-    local limit-tests = [ MATCH "^--limit-tests=(.*)" : [ modules.peek : ARGV ] ] ;
+    local filter-args = [ MATCH "^--(limit|exclude|include)-tests=(.*)" : [ modules.peek : ARGV ] ] ;
+    local filter-tests ;
+    while $(filter-args)
+    {
+        local type = $(filter-args[1]) ;
+        for local test in [ regex.split-list $(filter-args[2]) : "[,]" ]
+        {
+            filter-tests += $(type) $(test) ;
+        }
+        filter-args = $(filter-args[3-]) ;
+    }
+    # If any filter is given we make the initial set of tested libraries we:
+    # (a) make it empty if the first filter is an include.
+    # (b) make it full otherwise.
+    local include-default = y ;
+    if $(filter-tests[1]) && ( $(filter-tests[1]) in limit include )
+    {
+        include-default = n ;
+    }
     local location = [ project.attribute $(__name__) location ] ;
+    # We only run the check library test when host-os == target-os.
+    # Hence we need that information.
+    local host-os-default = [ feature.defaults <host-os> ] ;
     for local test in $(tests)
     {
-        local library = [ regex.split $(test) "/" ] ;
-        library = $(library[0]) ;
-        if $(limit-tests)
+        local library = [ path.parent $(test) ] ;
+        if $(library) = "."
         {
-            if ! [ MATCH "^($(limit-tests))" : $(test) ]
-            {
-                library = ;
-            }
+            library = $(test) ;
         }
-        if $(library)
+        local include-test = $(include-default) ;
+        local t = 1 ;
+        local f = 2 ;
+        while $(filter-tests[$(f)])
         {
-            use-project /boost/$(test) : ../$(root)/$(test) ;
-            if $(root) = libs && ( ! ( $(library) in $(libraries) ) )
+            if [ MATCH "^($(filter-tests[$(f)]))" : $(test) ]
+            {
+                if $(filter-tests[$(t)]) = exclude { include-test = n ; }
+                else { include-test = y ; }
+            }
+            t = [ CALC $(t) + 2 ] ;
+            f = [ CALC $(f) + 2 ] ;
+        }
+        if $(include-test) = y
+        {
+            if [ path.exists ../$(root)/$(test) ]
+            {
+                use-project /boost/$(test) : ../$(root)/$(test) ;
+            }
+            if $(root) = libs && ! $(no-check-libs) && ( ! ( $(library) in $(libraries) ) )
             {
                 libraries += $(library) ;
                 local test_module = [ project.find ../$(root)/$(test) : $(location) ] ;
                 modules.poke $(test_module) : __LIBRARY__ : $(root)/$(library) ;
                 modules.poke $(test_module) : __JAMFILE__ : [ modules.peek project : JAMFILE ] ;
+                modules.poke $(test_module) : __REQUIRE__ : <target-os>$(host-os-default:G=) ;
                 project.push-current [ project.target $(test_module) ] ;
                 module $(test_module)
                 {
@@ -64,6 +135,7 @@ local rule run-tests ( root : tests * )
                         <testing.arg>--library=$(__LIBRARY__)
                         <testing.arg>--jamfile=\"$(__JAMFILE__:J=;)\"
                         <testing.arg>organization
+                        $(__REQUIRE__)
                         :
                         __boost_check_library__ ;
                 }
@@ -75,20 +147,47 @@ local rule run-tests ( root : tests * )
                 build-project ../$(root)/$(test) ;
             }
         }
-        else
+    }
+}
+
+local rule find-targets ( target : libs * )
+{
+    local result = ;
+
+    for local lib in $(libs)
+    {
+        local path = ../libs/$(lib)/test ;
+        local project = [ project.load $(path) ] ;
+        local pt = [ project.target $(project) ] ;
+        local mt = [ $(pt).main-target $(target) ] ;
+
+        if $(mt)
         {
-            # use-project /boost/$(test) : ../$(root)/$(test) ;
+            result += $(path)//$(target) ;
         }
     }
+
+    return $(result) ;
 }
 
 local libs-to-test = ;
 for local libdir in [ path.glob $(BOOST_ROOT) : libs/* ]
 {
-    local jamfiles = [ path.glob [ path.join $(libdir) test ] : [ modules.peek project : JAMFILE ] ] ;
+    local jamfile = [ modules.peek project : JAMFILE ] ;
+    local jamfiles = [ path.glob [ path.join $(libdir) test ] : $(jamfile) ] ;
     if $(jamfiles)
     {
         libs-to-test += $(libdir:B) ;
+    }
+    if [ path.glob $(libdir) : sublibs ]
+    {
+        jamfiles = [ path.glob $(libdir) : */test/$(jamfile) ] ;
+        for local sublib_jamfile in $(jamfiles)
+        {
+            local sublibdir = [ path.parent [ path.parent $(sublib_jamfile) ] ] ;
+            local sublib = $(libdir:B)/$(sublibdir:B) ;
+            libs-to-test += $(sublib) ;
+        }
     }
 }
 libs-to-test = [ SORT $(libs-to-test) ] ;
@@ -98,33 +197,6 @@ run-tests libs : $(libs-to-test)/test ;
 # Tests from Jamfiles in individual library test subdirectories
 # Please keep these in alphabetic order by test-suite name
 run-tests libs :
-    algorithm/minmax/test       # test-suite algorith/minmax
-    algorithm/string/test       # test-suite algorithm/string
-    concept_check               # test-suite concept_check
-    container/bench             # test-suite container benchmarks
-    container/example           # test-suite container_example
-    core/test/swap              # test-suite core/swap
-    disjoint_sets               # test-suite disjoint_sets
-    dynamic_bitset              # test-suite dynamic_bitset
-    functional/factory/test     # test-suite functional/factory
-    functional/forward/test     # test-suite functional/forward
-    functional/hash/test/extra  # test-suite functional/hash
-    functional/overloaded_function/test # test-suite func./overloaded_function
-    geometry/index/test         # test-suite geometry/index
-    interprocess/example        # test-suite interprocess_example
-    intrusive/example           # test-suite intrusive_example
-    move/example                # test-suite move_example
-    numeric/conversion/test     # test-suite numeric/conversion
-    numeric/interval/test       # test-suite numeric/interval
-    numeric/odeint/test         # test-suite numeric/odeint
-    numeric/ublas/test          # test-suite numeirc/uBLAS
-    regex/example               # test-suite regex-examples
-    spirit/classic/test         # test-suite classic spirit
-    spirit/repository/test      # test-suite spirit_v2 repository
-    static_assert               # test-suite static_assert
-    unordered/test/unordered    # test-suite unordered
-    unordered/test/exception    # test-suite unordered-exception
-    utility/identity_type/test  # test-suite utility/identity_type
     wave/test/build             # test-suite wave
     ;
 
@@ -136,3 +208,9 @@ if $(check-libs-only-targets)
 {
     alias check-libs-only : $(check-libs-only-targets) ;
 }
+
+alias minimal : [ find-targets minimal : $(libs-to-test) ] ;
+explicit minimal ;
+
+alias quick : [ find-targets quick : $(libs-to-test) ] ;
+explicit quick ;
