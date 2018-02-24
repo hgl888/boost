@@ -55,6 +55,10 @@ matrix:
     - env: SCRIPT=ci_boost_status TARGET=quick TOOLSET=clang CXXSTD=03,11
       compiler: clang++
 
+    # Build Boost
+    - env: SCRIPT=ci_boost_build TOOLSET=gcc CXXSTD=11
+      compiler: g++
+
     # Run tests for the library updated by this commit.
     - env: SCRIPT=ci_boost_test_library TOOLSET=gcc CXXSTD=11
       compiler: g++
@@ -62,11 +66,11 @@ matrix:
     - env: SCRIPT=ci_boost_test_library TOOLSET=clang CXXSTD=11
       compiler: clang++
 
-    # Library requirements tests.
-    - env: SCRIPT=ci_boost_library_check
-
-  allow_failures:
-    - env: SCRIPT=ci_boost_library_check
+#    # Library requirements tests.
+#    - env: SCRIPT=ci_boost_library_check
+#
+#  allow_failures:
+#    - env: SCRIPT=ci_boost_library_check
 
 before_install:
   # Fetch the scripts to do the actual building/testing.
